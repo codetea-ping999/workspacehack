@@ -1,0 +1,12 @@
+# Copy to repos.toml (or generate it with `ws init`).
+# repos.toml is git-ignored: it may list private repositories.
+
+root = "~/workspace"   # where `ws clone` puts repositories
+
+[[repo]]
+name = "your-name/some-repo"
+tags = ["app"]          # optional; use with `ws status --tag app`
+
+[[repo]]
+name = "your-name/another-repo"
+path = "~/code/another-repo"   # optional per-repo path override
