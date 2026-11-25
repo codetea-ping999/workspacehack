@@ -6,7 +6,7 @@ Manage many GitHub repositories from one place.
 - **`ws clone / pull / status / run`** – clone everything, fast-forward every clean repo, see which repos are dirty or behind, and run a command in all of them.
 - **`ws init`** – generate the repo list from your GitHub account.
 
-Python 3.9+ and the [GitHub CLI](https://cli.github.com/) (`gh auth login`). No other dependencies.
+Python 3.10+ and the [GitHub CLI](https://cli.github.com/) (`gh auth login`). No other dependencies.
 
 ## Quick start
 
