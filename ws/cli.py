@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Callable, Sequence
 
 from . import __version__, config, dash, gitops, shell
@@ -37,7 +38,11 @@ def _list_repos(owner: str) -> list[dict]:
         return shell.gh_api("user/repos?affiliation=owner&per_page=100", paginate=True)
     try:
         return shell.gh_api(f"orgs/{owner}/repos?per_page=100", paginate=True)
-    except shell.CommandError:
+    except shell.CommandError as e:
+        if "404" not in e.stderr and "Not Found" not in e.stderr:
+            raise  # auth/rate-limit problems must not silently shrink the list
+        print(f"note: {owner} is not an organization you can list; falling back to its public repos "
+              f"only (private repos of other users are never listed).", file=sys.stderr)
         return shell.gh_api(f"users/{owner}/repos?per_page=100", paginate=True)
 
 
@@ -53,8 +58,8 @@ def cmd_init(args) -> int:
     if args.output == "-":
         sys.stdout.write(text)
     else:
-        from pathlib import Path
         p = Path(args.output)
+        p.parent.mkdir(parents=True, exist_ok=True)
         if p.exists() and not args.force:
             print(f"{p} already exists (use --force to overwrite)", file=sys.stderr)
             return 1
@@ -93,6 +98,11 @@ def cmd_pull(args) -> int:
 
 def cmd_status(args) -> int:
     _, repos = _selected(args)
+    fetch_errors: dict[str, str] = {}
+    if args.fetch:
+        for repo, err in zip(repos, _pmap(gitops.fetch, repos, args.jobs)):
+            if err:
+                fetch_errors[repo.name] = err
     states = _pmap(gitops.state, repos, args.jobs)
     rows = []
     for s in states:
@@ -102,14 +112,17 @@ def cmd_status(args) -> int:
             rows.append((s.repo.name, "?", "error", "", s.error))
         else:
             sync = f"↑{s.ahead} ↓{s.behind}" if s.has_upstream else "no upstream"
-            rows.append((s.repo.name, s.branch, "dirty" if s.dirty else "clean", sync, f"{s.dirty} changed" if s.dirty else ""))
+            rows.append((s.repo.name, s.branch, "dirty" if s.dirty else "clean", sync, f"{s.dirty} changed" if s.dirty else fetch_errors.get(s.repo.name, "")))
     print(_table(rows, ["repo", "branch", "tree", "sync", "note"]))
+    if not args.fetch:
+        print("\nahead/behind uses the last fetch; run `ws status --fetch` for current numbers.")
     return 0
 
 
 def cmd_run(args) -> int:
     _, repos = _selected(args)
-    cmd = [c for c in args.command if c != "--"] if args.command[:1] == ["--"] else args.command
+    # Drop only the leading separator; later `--` belong to the command (git checkout -- file).
+    cmd = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not cmd:
         print("usage: ws run [--tag T] -- <command ...>", file=sys.stderr)
         return 2
@@ -127,11 +140,13 @@ def cmd_run(args) -> int:
 
 def cmd_dash(args) -> int:
     _, repos = _selected(args)
-    reports = _pmap(lambda r: dash.fetch(r.name), repos, args.jobs)
-    text = dash.render(reports, show_issues=args.issues, hide_private_titles=args.hide_private_titles)
+    reports = _pmap(lambda r: dash.fetch(r.name, pr_ci=not args.no_pr_ci), repos, args.jobs)
+    text = dash.render(reports, show_issues=args.issues, hide_private_titles=args.hide_private_titles,
+                       anonymize_private=args.anonymize_private)
     if args.output == "-":
         sys.stdout.write(text)
     else:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w") as f:
             f.write(text)
         print(f"wrote {args.output}")
@@ -165,6 +180,8 @@ def build_parser() -> argparse.ArgumentParser:
         ("status", cmd_status, "branch / dirty / ahead-behind for every repo"),
     ]:
         s = sub.add_parser(name, parents=[common], help=help_)
+        if name == "status":
+            s.add_argument("--fetch", action="store_true", help="git fetch each repo first")
         s.set_defaults(fn=fn)
 
     s = sub.add_parser("run", parents=[common], help="run a command in every cloned repo")
@@ -176,6 +193,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--issues", type=int, default=5, help="issues listed per repo (default 5)")
     s.add_argument("--hide-private-titles", action="store_true",
                    help="replace issue/PR titles of private repos (safe for public output)")
+    s.add_argument("--anonymize-private", action="store_true",
+                   help="collapse private repos into one aggregate row: no names, links or titles")
+    s.add_argument("--no-pr-ci", action="store_true",
+                   help="skip per-PR CI lookups (2 API calls per PR) to save API quota")
     s.set_defaults(fn=cmd_dash)
     return p
 

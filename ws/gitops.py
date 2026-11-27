@@ -1,6 +1,7 @@
 """Local git operations across the cloned workspace."""
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import Sequence
@@ -37,9 +38,35 @@ def parse_status(porcelain_v2: str) -> tuple[str, int, int, int, bool]:
     return branch, dirty, ahead, behind, upstream
 
 
+_REMOTE_RE = re.compile(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", re.IGNORECASE)
+
+
+def remote_name(url: str) -> str | None:
+    """'owner/repo' from a github.com remote URL (https, ssh, scp-style), else None."""
+    m = _REMOTE_RE.search(url.strip())
+    return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def origin_error(repo: Repo) -> str:
+    """'' if the checkout at repo.path has origin == repo.name, else a human-readable problem."""
+    # raw configured URL (not insteadOf-expanded), so a github.com remote reads as github.com
+    proc = shell.run(["git", "config", "--get", "remote.origin.url"], cwd=repo.path, check=False)
+    if proc.returncode != 0:
+        return "no 'origin' remote"
+    found = remote_name(proc.stdout)
+    if found is None:
+        return f"origin is not a github.com URL: {proc.stdout.strip()}"
+    if found.lower() != repo.name.lower():
+        return f"origin is {found}, expected {repo.name}"
+    return ""
+
+
 def state(repo: Repo) -> RepoState:
     if not (repo.path / ".git").exists():
         return RepoState(repo, cloned=False)
+    bad = origin_error(repo)
+    if bad:
+        return RepoState(repo, cloned=True, error=bad)
     try:
         out = shell.run(["git", "status", "--porcelain=v2", "--branch"], cwd=repo.path).stdout
     except shell.CommandError as e:
@@ -50,7 +77,12 @@ def state(repo: Repo) -> RepoState:
 
 def clone(repo: Repo) -> str:
     if (repo.path / ".git").exists():
+        bad = origin_error(repo)
+        if bad:
+            raise shell.CommandError(["ws", "clone", repo.name], 1, f"{repo.path} exists but {bad}")
         return "already cloned"
+    if repo.path.exists() and any(repo.path.iterdir()):
+        raise shell.CommandError(["ws", "clone", repo.name], 1, f"{repo.path} exists and is not empty")
     repo.path.parent.mkdir(parents=True, exist_ok=True)
     try:
         shell.run(["gh", "repo", "clone", repo.name, str(repo.path)])
@@ -79,9 +111,20 @@ def pull(repo: Repo) -> str:
     return "up to date" if not last or "up to date" in last[0].lower() else "updated"
 
 
+def fetch(repo: Repo) -> str:
+    """Refresh remote-tracking refs so ahead/behind is current. Returns '' or an error."""
+    if not (repo.path / ".git").exists() or origin_error(repo):
+        return ""
+    proc = shell.run(["git", "fetch", "--quiet", "--prune"], cwd=repo.path, check=False)
+    return "" if proc.returncode == 0 else (proc.stderr.strip().splitlines() or ["fetch failed"])[-1]
+
+
 def run_in(repo: Repo, cmd: Sequence[str]) -> tuple[int, str]:
     if not (repo.path / ".git").exists():
         return 127, "not cloned"
+    bad = origin_error(repo)
+    if bad:
+        return 126, f"refusing to run: {bad}"
     try:
         proc = subprocess.run(list(cmd), cwd=repo.path, capture_output=True, text=True)
     except FileNotFoundError:

@@ -80,3 +80,68 @@ def test_render_truncates_issue_list():
     issues = [{"number": n, "title": f"t{n}", "updatedAt": f"2026-11-{n:02d}T00:00:00Z", "url": "u"} for n in range(1, 9)]
     text = dash.render([dash.RepoReport("o/a", issues=issues)], now=NOW, show_issues=3)
     assert "[#1](u)" in text and "[#4](u)" not in text and "and 5 more" in text
+
+
+def test_anonymize_private_leaks_nothing():
+    priv = dash.RepoReport("secret-org/hidden-proj", private=True, pushed_at="2026-11-20T00:00:00Z", main_ci="✅",
+                           issues=[{"number": 1, "title": "t", "updatedAt": "2026-11-01T00:00:00Z", "url": "https://github.com/secret-org/hidden-proj/issues/1"}],
+                           prs=[{"number": 2, "title": "p", "updatedAt": "2026-11-24T00:00:00Z", "isDraft": False,
+                                 "url": "https://github.com/secret-org/hidden-proj/pull/2", "ci": "✅"}])
+    pub = dash.RepoReport("o/pub", private=False, pushed_at="2026-11-25T00:00:00Z",
+                          issues=[{"number": 3, "title": "public one", "updatedAt": "2026-11-01T00:00:00Z", "url": "u3"}])
+    text = dash.render([priv, pub], now=NOW, anonymize_private=True)
+    assert "secret" not in text and "hidden-proj" not in text
+    assert "o/pub" in text and "public one" in text
+    assert "1 private repos (anonymized)" in text
+    assert "across 2 repos" in text
+
+
+def test_anonymize_keeps_errors_visible():
+    text = dash.render([dash.RepoReport("o/broken", error="boom", private=True)], now=NOW, anonymize_private=True)
+    assert "error: boom" in text
+
+
+def test_fetch_can_skip_pr_ci(monkeypatch):
+    calls = []
+
+    def api(path, paginate=False):
+        calls.append(path)
+        if path.startswith("repos/o/a/pulls"):
+            return [{"number": 2, "title": "pr", "updated_at": "2026-11-24T00:00:00Z", "html_url": "u",
+                     "draft": False, "head": {"sha": "abc"}}]
+        if path.startswith("repos/o/a/issues"):
+            return []
+        if path.startswith("repos/o/a/actions"):
+            return {"workflow_runs": []}
+        if path == "repos/o/a":
+            return {"private": False, "archived": False, "default_branch": "main", "pushed_at": ""}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(shell, "gh_api", api)
+    rep = dash.fetch("o/a", pr_ci=False)
+    assert rep.prs[0]["ci"] == "-"
+    assert not any("check-runs" in c or "/status" in c for c in calls)
+
+
+def test_fetch_caps_pr_ci_lookups(monkeypatch):
+    prs = [{"number": n, "title": "p", "updated_at": "2026-11-24T00:00:00Z", "html_url": "u", "draft": False,
+            "head": {"sha": f"s{n}"}} for n in range(dash.MAX_PR_CI_LOOKUPS + 5)]
+    looked_up = []
+
+    def api(path, paginate=False):
+        if path.startswith("repos/o/a/pulls"):
+            return prs
+        if path.startswith("repos/o/a/issues"):
+            return []
+        if path.startswith("repos/o/a/actions"):
+            return {"workflow_runs": []}
+        if "check-runs" in path:
+            looked_up.append(path)
+            return {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+        if "/status" in path:
+            return {"statuses": []}
+        return {"private": False, "archived": False, "default_branch": "main", "pushed_at": ""}
+
+    monkeypatch.setattr(shell, "gh_api", api)
+    dash.fetch("o/a")
+    assert len(looked_up) == dash.MAX_PR_CI_LOOKUPS

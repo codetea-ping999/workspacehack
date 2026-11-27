@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,6 +20,19 @@ DEFAULT_ROOT = "~/workspace"
 
 class ConfigError(Exception):
     pass
+
+
+# GitHub: owner = alphanumerics and hyphens; repo = alphanumerics, '-', '_', '.'
+_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+$")
+
+
+def valid_name(name: object) -> bool:
+    return (
+        isinstance(name, str)
+        and bool(_NAME_RE.match(name))
+        and name.split("/", 1)[1] not in (".", "..")
+        and not name.endswith(".git")
+    )
 
 
 @dataclass
@@ -42,8 +56,18 @@ class Config:
         if tag:
             repos = [r for r in repos if tag in r.tags]
         if only:
-            wanted = set(only)
-            repos = [r for r in repos if r.name in wanted or r.short in wanted]
+            picked: list[Repo] = []
+            for want in only:
+                exact = [r for r in repos if r.name.lower() == want.lower()]
+                matches = exact or [r for r in repos if r.short.lower() == want.lower()]
+                if not matches:
+                    raise ConfigError(f"--repo {want!r} matches no configured repository")
+                if len(matches) > 1:
+                    names = ", ".join(r.name for r in matches)
+                    raise ConfigError(f"--repo {want!r} is ambiguous ({names}); use owner/name")
+                if matches[0] not in picked:
+                    picked.append(matches[0])
+            repos = picked
         return repos
 
 
@@ -53,18 +77,30 @@ def parse(data: dict, base: Path | None = None) -> Config:
         root = (base / root).resolve()
     repos: list[Repo] = []
     seen: set[str] = set()
+    paths: dict[Path, str] = {}
     for i, item in enumerate(data.get("repo", [])):
         name = item.get("name")
-        if not isinstance(name, str) or name.count("/") != 1 or not all(name.split("/")):
+        if not valid_name(name):
             raise ConfigError(f"[[repo]] #{i + 1}: 'name' must look like 'owner/repo' (got {name!r})")
         if name.lower() in seen:
             raise ConfigError(f"duplicate repo: {name}")
         seen.add(name.lower())
-        path = Path(os.path.expanduser(item["path"])) if "path" in item else root / name.split("/")[1]
+        # Default location includes the owner, so team-a/tools and team-b/tools never collide.
+        if "path" in item:
+            path = Path(os.path.expanduser(item["path"]))
+            if base is not None and not path.is_absolute():
+                path = base / path
+        else:
+            owner, short = name.split("/", 1)
+            path = root / owner / short
+        key = Path(os.path.abspath(path))
+        if key in paths:
+            raise ConfigError(f"{name} and {paths[key]} resolve to the same path: {key}")
+        paths[key] = name
         tags = item.get("tags", [])
         if not isinstance(tags, list):
             raise ConfigError(f"{name}: 'tags' must be a list")
-        repos.append(Repo(name=name, path=path, tags=[str(t) for t in tags]))
+        repos.append(Repo(name=name, path=key, tags=[str(t) for t in tags]))
     return Config(root=root, repos=repos)
 
 

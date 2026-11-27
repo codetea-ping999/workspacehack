@@ -58,7 +58,7 @@ def _pr_ci(name: str, sha: str) -> str:
     return ci_state((runs or {}).get("check_runs"), (status or {}).get("statuses"))
 
 
-def fetch(name: str) -> RepoReport:
+def fetch(name: str, pr_ci: bool = True) -> RepoReport:
     rep = RepoReport(name=name)
     try:
         info = shell.gh_api(f"repos/{name}")
@@ -77,7 +77,8 @@ def fetch(name: str) -> RepoReport:
             rep.prs.append({
                 "number": p["number"], "title": p["title"], "updatedAt": p["updated_at"],
                 "isDraft": p.get("draft", False), "url": p["html_url"],
-                "ci": _pr_ci(name, p["head"]["sha"]) if n < MAX_PR_CI_LOOKUPS else "-",
+                # "-" = not looked up (disabled, or beyond MAX_PR_CI_LOOKUPS)
+                "ci": _pr_ci(name, p["head"]["sha"]) if pr_ci and n < MAX_PR_CI_LOOKUPS else "-",
             })
         if rep.default_branch and not rep.archived:
             runs = shell.gh_api(
@@ -110,8 +111,13 @@ def _esc(text: str) -> str:
 
 
 def render(reports: list[RepoReport], now: datetime | None = None, show_issues: int = 5,
-           hide_private_titles: bool = False) -> str:
+           hide_private_titles: bool = False, anonymize_private: bool = False) -> str:
     now = now or datetime.now(timezone.utc)
+    private: list[RepoReport] = []
+    if anonymize_private:
+        # Private repos are not listed at all (no name, link or title); only an aggregate remains.
+        private = [r for r in reports if r.private and not r.error]
+        reports = [r for r in reports if not (r.private and not r.error)]
     out = [f"# Repository dashboard", "", f"_Generated {now:%Y-%m-%d %H:%M} UTC_", ""]
     out += ["| Repo | Issues | PRs | CI (default branch) | Last push |", "|---|---:|---:|:-:|---|"]
     for r in sorted(reports, key=lambda r: (-(len(r.prs) + len(r.issues)), r.name)):
@@ -123,9 +129,15 @@ def render(reports: list[RepoReport], now: datetime | None = None, show_issues: 
             f"| [{r.name}](https://github.com/{r.name}){flags} | {len(r.issues)} | {len(r.prs)} "
             f"| {r.main_ci} | {age(r.pushed_at, now)} |"
         )
-    total_i = sum(len(r.issues) for r in reports)
-    total_p = sum(len(r.prs) for r in reports)
-    out += ["", f"**Total:** {total_i} open issues, {total_p} open PRs across {len(reports)} repos.", ""]
+    if private:
+        out.append(
+            f"| _{len(private)} private repos (anonymized)_ | {sum(len(r.issues) for r in private)} "
+            f"| {sum(len(r.prs) for r in private)} | - | - |"
+        )
+    everything = reports + private
+    total_i = sum(len(r.issues) for r in everything)
+    total_p = sum(len(r.prs) for r in everything)
+    out += ["", f"**Total:** {total_i} open issues, {total_p} open PRs across {len(everything)} repos.", ""]
 
     for r in sorted(reports, key=lambda r: r.name):
         if r.error or not (r.prs or r.issues):
