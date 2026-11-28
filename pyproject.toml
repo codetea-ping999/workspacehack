@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workspacehack"
+version = "0.1.0"
+description = "Dashboard and bulk operations for many GitHub repositories"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["tomli>=2; python_version < '3.11'"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+ws = "ws.cli:main"
+
+[tool.setuptools]
+packages = ["ws"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

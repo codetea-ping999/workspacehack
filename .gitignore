@@ -1,0 +1,8 @@
+# Your own repo list and generated reports may reveal private repository names/titles.
+repos.toml
+reports/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/

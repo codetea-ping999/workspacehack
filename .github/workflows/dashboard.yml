@@ -1,0 +1,49 @@
+name: dashboard
+
+# Daily cross-repo dashboard, published as the job summary.
+# Runs only when THIS repository is private, because the summary of a public
+# repository is public and would expose private issue/PR titles.
+# Needs a secret WS_TOKEN: a personal access token that can read your repositories
+# (classic: `repo` scope; fine-grained: Issues/Pull requests/Actions/Metadata read).
+
+on:
+  schedule:
+    - cron: "0 22 * * *"   # 07:00 JST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse to run in a public repository
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          private=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)
+          echo "private=$private" >> "$GITHUB_OUTPUT"
+          if [ "$private" != "true" ]; then
+            echo "::warning::Repository is public; skipping so private titles are not published. Make it private to enable the dashboard."
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.private == 'true'
+        with:
+          python-version: "3.12"
+      - name: Build dashboard
+        if: steps.guard.outputs.private == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WS_TOKEN }}
+        run: |
+          python -m ws init --owner "${{ github.repository_owner }}" --force
+          mkdir -p reports
+          python -m ws dash -o reports/dashboard.md
+          cat reports/dashboard.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: steps.guard.outputs.private == 'true'
+        with:
+          name: dashboard
+          path: reports/dashboard.md
